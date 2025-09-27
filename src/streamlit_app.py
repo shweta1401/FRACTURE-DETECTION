@@ -30,6 +30,8 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed"
 )
+st.write("Secrets available:", list(st.secrets.keys()))
+
 
 # ✅ Secrets check
 api_key_available = bool(st.secrets.get("openrouter_api_key", ""))
