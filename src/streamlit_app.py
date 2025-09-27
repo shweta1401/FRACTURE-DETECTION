@@ -17,6 +17,7 @@ import cv2
 from io import BytesIO
 import base64
 from fpdf import FPDF  
+import re
 
 # Import helper modules
 from gradcam_explainability import generate_gradcam_plus, auto_suggest_cam_region
@@ -30,7 +31,15 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-
+# ✅ Secrets check
+api_key_available = bool(st.secrets.get("openrouter_api_key", ""))
+if api_key_available:
+    st.success("🔑 OpenRouter API key loaded successfully.")
+else:
+    st.warning(
+        "⚠️ No OpenRouter API key found. GPT summaries will be disabled until you add it in "
+        "Streamlit Cloud → App → Settings → Secrets."
+    )
 
 # Class Labels
 class_names = ['XR_ELBOW', 'XR_FINGER', 'XR_FOREARM', 'XR_HAND', 'XR_HUMERUS', 'XR_SHOULDER', 'XR_WRIST']
@@ -70,95 +79,46 @@ def get_image_download_link(img_np, filename="gradcam_output.png"):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f'<a href="data:image/png;base64,{img_str}" download="{filename}">Download Grad-CAM Heatmap</a>'
 
-# Generate PDF of Summary
-from fpdf import FPDF
-from io import BytesIO
-import re
-
+# --- PDF Helpers ---
 def _clean_text(text: str) -> str:
-    """Normalize weird/invisible unicode that breaks layout/wrapping."""
     replacements = {
-        "\u00A0": " ",  # NBSP
-        "\u202F": " ",  # narrow NBSP
-        "\u2009": " ",  # thin space
-        "\u200A": " ",  # hair space
-        "\u200B": " ",  # zero-width space
-        "\u200C": " ",  # zero-width non-joiner
-        "\u200D": " ",  # zero-width joiner
-        "\u2060": " ",  # word joiner
-        "\ufeff": " ",  # BOM
-        "\u00AD": "-",  # soft hyphen
+        "\u00A0": " ", "\u202F": " ", "\u2009": " ", "\u200A": " ", "\u200B": " ",
+        "\u200C": " ", "\u200D": " ", "\u2060": " ", "\ufeff": " ", "\u00AD": "-",
         "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2015": "-",
-        "“": '"', "”": '"', "’": "'", "‘": "'",
-        "\t": " ",
+        "“": '"', "”": '"', "’": "'", "‘": "'", "\t": " ",
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
-    # collapse long runs of spaces
     text = re.sub(r" {2,}", " ", text)
-    # drop any other non-printables (keep newlines)
     text = "".join(ch if (ch == "\n" or ch.isprintable()) else " " for ch in text)
     return text
 
 def _write_wrapped_paragraph(pdf: FPDF, text: str, epw: float, line_h: float) -> None:
-    """
-    Manually wrap text: break on spaces; if a single word > line width, split by characters.
-    This avoids fpdf2's "Not enough horizontal space to render a single character".
-    """
     for raw_line in text.split("\n"):
         line = _clean_text(raw_line)
         if line.strip() == "":
-            # blank line
-            pdf.ln(line_h)
-            pdf.set_x(pdf.l_margin)
+            pdf.ln(line_h); pdf.set_x(pdf.l_margin)
             continue
 
         pdf.set_x(pdf.l_margin)
         xlimit = pdf.l_margin + epw
 
         for word in line.split(" "):
-            if word == "":
-                # just a space
-                space_w = pdf.get_string_width(" ")
-                if pdf.get_x() + space_w > xlimit:
-                    pdf.ln(line_h); pdf.set_x(pdf.l_margin)
-                else:
-                    pdf.cell(space_w, line_h, " ", ln=0)
-                continue
-
             chunk = word + " "
             chunk_w = pdf.get_string_width(chunk)
-
             if pdf.get_x() + chunk_w <= xlimit:
-                # fits on current line
                 pdf.cell(chunk_w, line_h, chunk, ln=0)
             else:
-                # if the word itself is longer than the entire line, split by characters
                 if pdf.get_string_width(word) > epw:
                     for ch in word:
                         ch_w = pdf.get_string_width(ch)
-                        if ch_w > epw:
-                            # absurdly wide glyph at this size: force smaller font for this char
-                            cur_size = pdf.font_size_pt
-                            pdf.set_font_size(max(cur_size - 1, 6))
-                            ch_w = pdf.get_string_width(ch)
-
                         if pdf.get_x() + ch_w > xlimit:
                             pdf.ln(line_h); pdf.set_x(pdf.l_margin)
                         pdf.cell(ch_w, line_h, ch, ln=0)
-
-                    # space after the long word
-                    sp_w = pdf.get_string_width(" ")
-                    if pdf.get_x() + sp_w > xlimit:
-                        pdf.ln(line_h); pdf.set_x(pdf.l_margin)
-                    else:
-                        pdf.cell(sp_w, line_h, " ", ln=0)
+                    pdf.cell(pdf.get_string_width(" "), line_h, " ", ln=0)
                 else:
-                    # move to new line then write the word
                     pdf.ln(line_h); pdf.set_x(pdf.l_margin)
                     pdf.cell(chunk_w, line_h, chunk, ln=0)
-
-        # end of this logical line
         pdf.ln(line_h)
         pdf.set_x(pdf.l_margin)
 
@@ -167,24 +127,16 @@ def create_pdf(summary_text: str) -> BytesIO:
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_margins(15, 15, 15)
     pdf.add_page()
-
-    # Try Unicode font first; if unavailable, fall back to core font
     try:
         pdf.add_font("DejaVu", "", "fonts/DejaVuSans.ttf", uni=True)
         pdf.set_font("DejaVu", size=12)
     except Exception:
         pdf.set_font("Helvetica", size=12)
-        # sanitize more aggressively for core font
         summary_text = _clean_text(summary_text)
-
     epw = pdf.w - pdf.l_margin - pdf.r_margin
     line_h = pdf.font_size * 1.6
-
     _write_wrapped_paragraph(pdf, summary_text, epw, line_h)
-
-    pdf_bytes = pdf.output(dest="S")  # bytes/bytearray in fpdf2
-    return BytesIO(pdf_bytes)
-
+    return BytesIO(pdf.output(dest="S"))
 
 # -------------------------
 # Streamlit Interface
@@ -247,15 +199,19 @@ with tab1:
         with st.expander("Generate AI Summary"):
             cam_region = st.selectbox("Where is the Grad-CAM focused?", cam_region_options, index=cam_region_options.index(auto_region))
             if st.button("Generate GPT Summary"):
-                with st.spinner("Querying GPT via OpenRouter..."):
-                    gpt_result = generate_gpt_summary(
-                        bone_type, fracture_status, fracture_prob,
-                        cam_region, api_key=st.secrets["openrouter_api_key"]
-                    )
-                    st.success("AI-Captioned Summary:")
-                    st.markdown(gpt_result)
-                    pdf_data = create_pdf(gpt_result)
-                    st.download_button("Download PDF Report", data=pdf_data, file_name="fracture_summary.pdf", mime="application/pdf")
+                api_key = st.secrets.get("openrouter_api_key", "")
+                if not api_key:
+                    st.error("⚠️ OpenRouter API key not found. Please set it in Streamlit Cloud → App → Settings → Secrets.")
+                else:
+                    with st.spinner("Querying GPT via OpenRouter..."):
+                        gpt_result = generate_gpt_summary(
+                            bone_type, fracture_status, fracture_prob,
+                            cam_region, api_key=api_key
+                        )
+                        st.success("AI-Captioned Summary:")
+                        st.markdown(gpt_result)
+                        pdf_data = create_pdf(gpt_result)
+                        st.download_button("Download PDF Report", data=pdf_data, file_name="fracture_summary.pdf", mime="application/pdf")
 
 with tab2:
     st.title("Model & System Info")
