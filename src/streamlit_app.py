@@ -212,8 +212,7 @@ with tab1:
                         )
                         st.success("AI-Captioned Summary:")
                         st.markdown(gpt_result)
-                        pdf_data = create_pdf(gpt_result)
-                        st.download_button("Download PDF Report", data=pdf_data, file_name="fracture_summary.pdf", mime="application/pdf")
+
 
 with tab2:
     st.title("Model & System Info")
