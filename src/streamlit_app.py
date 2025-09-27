@@ -34,7 +34,7 @@ st.write("Secrets available:", list(st.secrets.keys()))
 
 
 # ✅ Secrets check
-api_key_available = bool(st.secrets.get("openrouter_api_key", ""))
+api_key_available = bool(st.secrets.get("OPENROUTER_API_KEY", ""))
 if api_key_available:
     st.success("🔑 OpenRouter API key loaded successfully.")
 else:
@@ -201,7 +201,7 @@ with tab1:
         with st.expander("Generate AI Summary"):
             cam_region = st.selectbox("Where is the Grad-CAM focused?", cam_region_options, index=cam_region_options.index(auto_region))
             if st.button("Generate GPT Summary"):
-                api_key = st.secrets.get("openrouter_api_key", "")
+                api_key = st.secrets.get("OPENROUTER_API_KEY", "")
                 if not api_key:
                     st.error("⚠️ OpenRouter API key not found. Please set it in Streamlit Cloud → App → Settings → Secrets.")
                 else:
