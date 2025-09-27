@@ -6,16 +6,21 @@ GPT-Powered Diagnostic Summaries
 import requests
 
 
-def generate_gpt_summary(bone_type, fracture_status, confidence, cam_description, api_key, model="openai/gpt-4"):
+def generate_gpt_summary(
+    bone_type, fracture_status, confidence, cam_description,
+    api_key, model="openai/gpt-3.5-turbo"
+):
     """
     Generate GPT diagnostic summary.
+
     Args:
         bone_type (str): Predicted bone type
         fracture_status (str): "Fracture" or "No Fracture"
         confidence (float): Model-predicted fracture probability
         cam_description (str): Anatomical focus area from Grad-CAM++
         api_key (str): OpenRouter API key
-        model (str): GPT model name
+        model (str): GPT model name (default: openai/gpt-3.5-turbo for lower cost)
+
     Returns:
         str: GPT-generated diagnostic summary
     """
@@ -44,9 +49,28 @@ followed by a layman explanation for the patient.
     }
 
     try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=data
+        )
         response.raise_for_status()
         result = response.json()
         return result["choices"][0]["message"]["content"].strip()
+
+    except requests.exceptions.HTTPError as http_err:
+        if response.status_code == 402:
+            return (
+                "⚠️ Unable to generate summary: Your OpenRouter account has no credits. "
+                "Please top up your account or switch to a free model.\n\n"
+                "👉 Tip: The default model is now `openai/gpt-3.5-turbo`, which may be more affordable. "
+                "If you still face this issue, check your OpenRouter dashboard."
+            )
+        elif response.status_code == 401:
+            return (
+                "❌ Unauthorized: Your API key may be missing or invalid. "
+                "Please add a valid OpenRouter API key in `.streamlit/secrets.toml`."
+            )
+        return f"❌ HTTP error occurred: {http_err}"
     except Exception as e:
-        return f"❌ Error generating summary: {str(e)}"
+        return f"❌ Unexpected error generating summary: {str(e)}"

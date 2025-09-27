@@ -16,35 +16,35 @@ import numpy as np
 import cv2
 from io import BytesIO
 import base64
-from fpdf import FPDF
+from fpdf import FPDF  
 
 # Import helper modules
 from gradcam_explainability import generate_gradcam_plus, auto_suggest_cam_region
 from gpt_summary import generate_gpt_summary
 
-# ✅ Page Configuration
+# Page Configuration
 st.set_page_config(
     page_title="Fracture Detection AI",
-    page_icon="🢴",
+    page_icon="",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
 
 
-# ✅ Class Labels
+# Class Labels
 class_names = ['XR_ELBOW', 'XR_FINGER', 'XR_FOREARM', 'XR_HAND', 'XR_HUMERUS', 'XR_SHOULDER', 'XR_WRIST']
 fracture_classes = ['No Fracture', 'Fracture']
 cam_region_options = ["humeral head", "joint interface", "implant screw zone", "medial epicondyle", "distal radius", "not clearly localized"]
 
-# ✅ Image Preprocessing
+# Image Preprocessing
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-# ✅ Load Bone Classification Model
+# Load Bone Classification Model
 @st.cache_resource
 def load_bone_model():
     model = efficientnet_b3(weights=None)
@@ -53,7 +53,7 @@ def load_bone_model():
     model.eval()
     return model
 
-# ✅ Load Fracture Detection Model
+# Load Fracture Detection Model
 @st.cache_resource
 def load_fracture_model(bone_type):
     model = efficientnet_b0(weights=None)
@@ -63,22 +63,127 @@ def load_fracture_model(bone_type):
     model.eval()
     return model
 
-# ✅ Download Heatmap Button
+# Download Heatmap Button
 def get_image_download_link(img_np, filename="gradcam_output.png"):
     buffered = BytesIO()
     Image.fromarray(img_np).save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
-    return f'<a href="data:image/png;base64,{img_str}" download="{filename}">📅 Download Grad-CAM Heatmap</a>'
+    return f'<a href="data:image/png;base64,{img_str}" download="{filename}">Download Grad-CAM Heatmap</a>'
 
-# ✅ Generate PDF of Summary
-def create_pdf(summary_text):
+# Generate PDF of Summary
+from fpdf import FPDF
+from io import BytesIO
+import re
+
+def _clean_text(text: str) -> str:
+    """Normalize weird/invisible unicode that breaks layout/wrapping."""
+    replacements = {
+        "\u00A0": " ",  # NBSP
+        "\u202F": " ",  # narrow NBSP
+        "\u2009": " ",  # thin space
+        "\u200A": " ",  # hair space
+        "\u200B": " ",  # zero-width space
+        "\u200C": " ",  # zero-width non-joiner
+        "\u200D": " ",  # zero-width joiner
+        "\u2060": " ",  # word joiner
+        "\ufeff": " ",  # BOM
+        "\u00AD": "-",  # soft hyphen
+        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2015": "-",
+        "“": '"', "”": '"', "’": "'", "‘": "'",
+        "\t": " ",
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    # collapse long runs of spaces
+    text = re.sub(r" {2,}", " ", text)
+    # drop any other non-printables (keep newlines)
+    text = "".join(ch if (ch == "\n" or ch.isprintable()) else " " for ch in text)
+    return text
+
+def _write_wrapped_paragraph(pdf: FPDF, text: str, epw: float, line_h: float) -> None:
+    """
+    Manually wrap text: break on spaces; if a single word > line width, split by characters.
+    This avoids fpdf2's "Not enough horizontal space to render a single character".
+    """
+    for raw_line in text.split("\n"):
+        line = _clean_text(raw_line)
+        if line.strip() == "":
+            # blank line
+            pdf.ln(line_h)
+            pdf.set_x(pdf.l_margin)
+            continue
+
+        pdf.set_x(pdf.l_margin)
+        xlimit = pdf.l_margin + epw
+
+        for word in line.split(" "):
+            if word == "":
+                # just a space
+                space_w = pdf.get_string_width(" ")
+                if pdf.get_x() + space_w > xlimit:
+                    pdf.ln(line_h); pdf.set_x(pdf.l_margin)
+                else:
+                    pdf.cell(space_w, line_h, " ", ln=0)
+                continue
+
+            chunk = word + " "
+            chunk_w = pdf.get_string_width(chunk)
+
+            if pdf.get_x() + chunk_w <= xlimit:
+                # fits on current line
+                pdf.cell(chunk_w, line_h, chunk, ln=0)
+            else:
+                # if the word itself is longer than the entire line, split by characters
+                if pdf.get_string_width(word) > epw:
+                    for ch in word:
+                        ch_w = pdf.get_string_width(ch)
+                        if ch_w > epw:
+                            # absurdly wide glyph at this size: force smaller font for this char
+                            cur_size = pdf.font_size_pt
+                            pdf.set_font_size(max(cur_size - 1, 6))
+                            ch_w = pdf.get_string_width(ch)
+
+                        if pdf.get_x() + ch_w > xlimit:
+                            pdf.ln(line_h); pdf.set_x(pdf.l_margin)
+                        pdf.cell(ch_w, line_h, ch, ln=0)
+
+                    # space after the long word
+                    sp_w = pdf.get_string_width(" ")
+                    if pdf.get_x() + sp_w > xlimit:
+                        pdf.ln(line_h); pdf.set_x(pdf.l_margin)
+                    else:
+                        pdf.cell(sp_w, line_h, " ", ln=0)
+                else:
+                    # move to new line then write the word
+                    pdf.ln(line_h); pdf.set_x(pdf.l_margin)
+                    pdf.cell(chunk_w, line_h, chunk, ln=0)
+
+        # end of this logical line
+        pdf.ln(line_h)
+        pdf.set_x(pdf.l_margin)
+
+def create_pdf(summary_text: str) -> BytesIO:
     pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_margins(15, 15, 15)
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    for line in summary_text.split('\n'):
-        pdf.multi_cell(0, 10, line)
-    pdf_output = pdf.output(dest='S').encode('latin1')
-    return BytesIO(pdf_output)
+
+    # Try Unicode font first; if unavailable, fall back to core font
+    try:
+        pdf.add_font("DejaVu", "", "fonts/DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVu", size=12)
+    except Exception:
+        pdf.set_font("Helvetica", size=12)
+        # sanitize more aggressively for core font
+        summary_text = _clean_text(summary_text)
+
+    epw = pdf.w - pdf.l_margin - pdf.r_margin
+    line_h = pdf.font_size * 1.6
+
+    _write_wrapped_paragraph(pdf, summary_text, epw, line_h)
+
+    pdf_bytes = pdf.output(dest="S")  # bytes/bytearray in fpdf2
+    return BytesIO(pdf_bytes)
 
 
 # -------------------------
@@ -87,7 +192,7 @@ def create_pdf(summary_text):
 tab1, tab2 = st.tabs(["Run", "Info"])
 
 with tab1:
-    st.title("🢴 Fracture Detection with AI")
+    st.title("Fracture Detection with AI")
     uploaded_file = st.file_uploader("Upload an X-ray image", type=["png", "jpg", "jpeg"])
     enhance = st.checkbox("Enhance contrast (recommended for low-quality scans)")
 
@@ -139,7 +244,7 @@ with tab1:
 
         # Step 4: GPT-Powered Diagnostic Summary
         st.subheader("4️⃣ AI-Powered Diagnostic Summary (GPT)")
-        with st.expander("📄 Generate AI Summary"):
+        with st.expander("Generate AI Summary"):
             cam_region = st.selectbox("Where is the Grad-CAM focused?", cam_region_options, index=cam_region_options.index(auto_region))
             if st.button("Generate GPT Summary"):
                 with st.spinner("Querying GPT via OpenRouter..."):
@@ -147,13 +252,13 @@ with tab1:
                         bone_type, fracture_status, fracture_prob,
                         cam_region, api_key=st.secrets["openrouter_api_key"]
                     )
-                    st.success("📝 AI-Captioned Summary:")
+                    st.success("AI-Captioned Summary:")
                     st.markdown(gpt_result)
                     pdf_data = create_pdf(gpt_result)
-                    st.download_button("📄 Download PDF Report", data=pdf_data, file_name="fracture_summary.pdf", mime="application/pdf")
+                    st.download_button("Download PDF Report", data=pdf_data, file_name="fracture_summary.pdf", mime="application/pdf")
 
 with tab2:
-    st.title("📚 Model & System Info")
+    st.title("Model & System Info")
     st.markdown("""
     **Bone Classifier:** EfficientNet-B3  
     **Fracture Detector:** EfficientNet-B0  
