@@ -1,0 +1,23 @@
+# Core
+torch
+torchvision
+numpy
+pandas
+scikit-learn
+tqdm
+
+# Visualization
+matplotlib
+seaborn
+Pillow
+opencv-python
+
+# Data augmentation
+albumentations
+
+# Web App
+streamlit
+fpdf
+
+# API
+requests
